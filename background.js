@@ -4,13 +4,14 @@ const DRIVE_FOLDER_NAME = 'LeetCode-Solutions';
 const DRIVE_FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder';
 const DRIVE_UPLOAD_ENDPOINT = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink';
 const DRIVE_FILES_ENDPOINT = 'https://www.googleapis.com/drive/v3/files';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 const DRIVE_FOLDER_QUERY_FIELDS = 'files(id,name,mimeType,modifiedTime),nextPageToken';
 
 const tokenCache = {
   accessToken: null
 };
 
+// BUG FIX: was never reset on failure, permanently breaking all subsequent calls.
+// Now it is cleared whenever the underlying call rejects so the next call retries.
 let solutionsFolderIdPromise = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -61,6 +62,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+// BUG FIX: was declared twice — the second declaration caused a SyntaxError that
+// crashed the entire service worker, making uploads and lookups silently fail.
 function sanitizeFileNamePart(value) {
   return String(value || '')
     .normalize('NFKD')
@@ -69,6 +72,10 @@ function sanitizeFileNamePart(value) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .trim();
+}
+
+function normalizeFileBaseName(value) {
+  return sanitizeFileNamePart(value).toLowerCase();
 }
 
 function buildFileName(problemTitle, extension) {
@@ -125,20 +132,6 @@ async function fetchWithAuth(url, options = {}, { retryOnAuthError = true, inter
   }
 
   return response;
-}
-
-function sanitizeFileNamePart(value) {
-  return String(value || '')
-    .normalize('NFKD')
-    .replace(/[\\/:*?"<>|]+/g, '-')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .trim();
-}
-
-function normalizeFileBaseName(value) {
-  return sanitizeFileNamePart(value).toLowerCase();
 }
 
 function getFileBaseName(fileName) {
@@ -205,9 +198,14 @@ async function listSolutionFiles(folderId, interactive = false) {
   return files;
 }
 
+// BUG FIX: cache is now cleared on failure so subsequent calls can retry
+// instead of forever returning a rejected promise.
 async function getSolutionsFolderId({ interactive = false } = {}) {
   if (!solutionsFolderIdPromise) {
-    solutionsFolderIdPromise = getOrCreateSolutionsFolderId(interactive);
+    solutionsFolderIdPromise = getOrCreateSolutionsFolderId(interactive).catch((err) => {
+      solutionsFolderIdPromise = null; // allow retry next time
+      throw err;
+    });
   }
 
   return solutionsFolderIdPromise;
