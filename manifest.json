@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "LeetCode to Google Drive Saver",
+  "version": "1.0.0",
+  "description": "Automatically saves accepted LeetCode solutions to Google Drive.",
+  "permissions": ["identity", "activeTab", "clipboardWrite"],
+  "host_permissions": [
+    "https://leetcode.com/*",
+    "https://www.googleapis.com/*"
+  ],
+  "oauth2": {
+    "client_id": "403490066049-d59k760uaa2c47rd5nqfmsqno7fc5p7h.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/drive"]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/problems/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "LeetCode to Google Drive Saver"
+  }
+}
