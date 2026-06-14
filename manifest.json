@@ -9,7 +9,7 @@
     "https://www.googleapis.com/*"
   ],
   "oauth2": {
-    "client_id": "403490066049-d59k760uaa2c47rd5nqfmsqno7fc5p7h.apps.googleusercontent.com",
+    "client_id": "403490066049-6gn0lvcgml0vt2h6l9rl5qmlpuk9lu5o.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/drive"]
   },
   "background": {
