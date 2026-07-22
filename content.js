@@ -9,6 +9,7 @@
   const PASTED_TOAST_MS = 2200;
   const SAVE_SUCCESS_TOAST_MS = 3000;
   const ERROR_TOAST_MS = 5000;
+  const NOT_FOUND_TOAST_MS = 1500; 
 
   const state = {
     lastProblemPath: location.pathname,
@@ -560,12 +561,7 @@
             <div class="text-block">
               <div class="kicker">Google Drive</div>
               <div class="title">No saved solution found</div>
-              <div class="subtitle">Write your solution, then save it to your LeetCode-Solutions folder whenever you're ready.</div>
             </div>
-            <button class="close-btn" type="button" data-action="dismiss" aria-label="Dismiss">✕</button>
-          </div>
-          <div class="footer">
-            <button class="btn btn-primary" type="button" data-action="save">💾 Save Solution</button>
           </div>
         </div>
       `;
@@ -675,6 +671,7 @@
       if (response?.ok && !response?.found) {
         state.status = 'not-found';
         renderUi();
+        scheduleAutoClose(NOT_FOUND_TOAST_MS, goReady); // correct — leaves floating Save button up
         return;
       }
 

@@ -198,6 +198,33 @@ async function listSolutionFiles(folderId, interactive = false) {
   return files;
 }
 
+
+async function trashDriveFile(fileId, interactive = false) {
+  const response = await fetchWithAuth(
+    `${DRIVE_FILES_ENDPOINT}/${encodeURIComponent(fileId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ trashed: true })
+    },
+    { interactive }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to trash the existing Drive file (${response.status}): ${errorText}`);
+  }
+
+  return response.json();
+}
+
+async function findExistingSolutionFiles(folderId, fileName, interactive = false) {
+  const files = await listSolutionFiles(folderId, interactive);
+  const targetName = normalizeFileBaseName(fileName);
+
+  return files.filter((file) => normalizeFileBaseName(file.name) === targetName);
+}
+
 // BUG FIX: cache is now cleared on failure so subsequent calls can retry
 // instead of forever returning a rejected promise.
 async function getSolutionsFolderId({ interactive = false } = {}) {
@@ -342,6 +369,18 @@ function buildMultipartBody(metadata, sourceCode) {
 async function uploadSolutionFile({ problemTitle, extension, code, language, problemPath }) {
   const folderId = await getSolutionsFolderId({ interactive: true });
   const fileName = buildFileName(problemTitle, extension);
+
+  // Only trash a previous file if BOTH the name and extension match exactly —
+  // e.g. saving a new .py solution won't touch an existing .cpp one for the same problem.
+  const existingFiles = await findExistingSolutionFiles(folderId, fileName, true);
+  for (const existingFile of existingFiles) {
+    try {
+      await trashDriveFile(existingFile.id, true);
+    } catch (error) {
+      console.warn('[Retained] Could not trash previous solution file:', existingFile.name, error);
+    }
+  }
+
   const metadata = {
     name: fileName,
     parents: [folderId],
@@ -355,9 +394,7 @@ async function uploadSolutionFile({ problemTitle, extension, code, language, pro
     DRIVE_UPLOAD_ENDPOINT,
     {
       method: 'POST',
-      headers: {
-        'Content-Type': multipart.contentType
-      },
+      headers: { 'Content-Type': multipart.contentType },
       body: multipart.body
     }
   );
