@@ -2,8 +2,11 @@
 
 Manifest V3 Chrome extension that saves your accepted LeetCode solutions to a
 `LeetCode-Solutions` folder in Google Drive, and offers to restore a saved
-solution when you revisit a problem — **entirely on your terms**, via explicit
-buttons. Nothing is saved or pasted automatically.
+solution when you revisit a problem. Saving happens **automatically once your
+submission is Accepted** — you can also save manually at any time via the
+floating button. Pasting a previously saved solution back into the editor is
+still entirely on your terms, via explicit Yes/No buttons — nothing is ever
+pasted automatically.
 
 ## Files
 
@@ -19,8 +22,9 @@ buttons. Nothing is saved or pasted automatically.
 - **On opening a problem page:** the extension checks Drive for a saved solution. A small "Checking for a saved solution…" indicator appears in the **bottom-right corner** (never full-screen, never blocking the page).
   - **Found:** a bottom-right card says "Solution available" and asks *"Paste it into the editor?"* with **Yes** / **No** buttons. Nothing is pasted unless you click **Yes**.
   - **Not found:** a bottom-right card says "No saved solution found" with a **💾 Save Solution** button.
-- **Saving is always manual.** The extension never watches for an "Accepted" verdict and never saves automatically — it only uploads when you click **Save Solution**. That button is always available in the bottom-right corner (as a small floating pill once you've dismissed the lookup card), so you can save whenever you feel your solution is actually ready.
-- **On save:** a "Saving to Drive…" indicator appears, followed by "Solution saved successfully!", both in the same corner.
+- **Autosave on Accepted.** The extension watches for you clicking LeetCode's **Submit** button, then watches the verdict panel for a few seconds. If it comes back **Accepted**, your code is uploaded to Drive automatically — no click required. This only fires after a fresh Submit click, so it won't trigger from browsing your Submissions history or switching tabs.
+- **Manual save is still available.** A **💾 Save Solution** button is always available in the bottom-right corner (as a small floating pill once you've dismissed the lookup card), so you can save a draft at any point, even before submitting.
+- **On save (auto or manual):** a "Saving…" indicator appears, followed by a success toast, both in the same corner. The autosave toast is labeled "Accepted" so you can tell it apart from a manual save.
 
 ## Why it doesn't work "out of the box"
 
@@ -87,7 +91,7 @@ Back on `chrome://extensions/`, click the reload icon on the extension's card so
 1. Go to any `https://leetcode.com/problems/...` page.
 2. On first load, you'll see a small popup asking you to sign in with Google and grant Drive access — this happens automatically the first time the extension checks for or saves a solution.
 3. The extension checks Drive for a saved solution (bottom-right indicator). If one exists, it asks whether to paste it into the editor — nothing is pasted without your say-so.
-4. Write your solution. When you're ready, click **💾 Save Solution** (bottom-right) to upload it — it's never saved automatically, even after an Accepted verdict.
+4. Write your solution and click **Submit** as normal. If it comes back **Accepted**, Retained saves it to Drive automatically. You can also click **💾 Save Solution** (bottom-right) at any time to save a draft manually.
 
 ## Notes
 

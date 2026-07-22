@@ -5,6 +5,21 @@
   const ROUTE_POLL_INTERVAL_MS = 1000;
   const EDITOR_WAIT_TIMEOUT_MS = 5000;
 
+  // --- Autosave-on-Accepted ---------------------------------------------
+  // We only ever look for a verdict after we've seen the user click Submit
+  // ourselves (see armAutoSaveWatch). We never scan the page for the word
+  // "Accepted" unconditionally — that would also match the Submissions
+  // history tab, past-run panels, etc.
+  const SUBMIT_BUTTON_SELECTORS = [
+    '[data-e2e-locator="console-submit-button"]',
+    'button[data-e2e-locator="submit-code-btn"]'
+  ];
+  const SUBMISSION_RESULT_SELECTORS = [
+    '[data-e2e-locator="submission-result"]'
+  ];
+  const ACCEPTED_VERDICT_TEXT = 'Accepted';
+  const AUTO_SAVE_ARM_TIMEOUT_MS = 30000; // give up waiting for a verdict after this long
+
   // How long transient toasts stay up before returning to the idle "Save" button
   const PASTED_TOAST_MS = 2200;
   const SAVE_SUCCESS_TOAST_MS = 3000;
@@ -22,7 +37,12 @@
     uiRoot: null,
     navigationWatcherInstalled: false,
     autoCloseTimer: null,
-    lookupRequestId: 0
+    lookupRequestId: 0,
+    isAutoSave: false,
+    autoSaveArmed: false,
+    autoSaveArmTimer: null,
+    autoSaveObserver: null,
+    lastHandledResultNode: null
   };
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -571,10 +591,10 @@
           <div class="row">
             <div class="icon info">💾</div>
             <div class="text-block">
-              <div class="kicker">Google Drive</div>
+              <div class="kicker">${state.isAutoSave ? 'Accepted ✅' : 'Google Drive'}</div>
               <div class="spinner-row">
                 <div class="spinner"></div>
-                <span class="title" style="font-weight:600;">Saving to Drive…</span>
+                <span class="title" style="font-weight:600;">${state.isAutoSave ? 'Saving your accepted solution…' : 'Saving to Drive…'}</span>
               </div>
             </div>
           </div>
@@ -586,8 +606,8 @@
           <div class="row">
             <div class="icon success">✅</div>
             <div class="text-block">
-              <div class="kicker">Google Drive</div>
-              <div class="title">Solution saved successfully!</div>
+              <div class="kicker">${state.isAutoSave ? 'Accepted' : 'Google Drive'}</div>
+              <div class="title">${state.isAutoSave ? 'Solution auto-saved to Drive!' : 'Solution saved successfully!'}</div>
             </div>
           </div>
         </div>
@@ -598,8 +618,8 @@
           <div class="row">
             <div class="icon error">⚠️</div>
             <div class="text-block">
-              <div class="kicker">Google Drive</div>
-              <div class="title">Something went wrong</div>
+              <div class="kicker">${state.isAutoSave ? 'Accepted' : 'Google Drive'}</div>
+              <div class="title">${state.isAutoSave ? 'Auto-save failed' : 'Something went wrong'}</div>
               <div class="subtitle">${errorMsg}</div>
             </div>
             <button class="close-btn" type="button" data-action="dismiss" aria-label="Dismiss">✕</button>
@@ -715,11 +735,13 @@
     goReady();
   }
 
-  // Only ever called from an explicit user click (the Save button) — never automatically.
-  async function performSave() {
+  // Called either from an explicit Save button click, or automatically once
+  // we've detected an Accepted verdict following a Submit click (isAuto=true).
+  async function performSave(isAuto = false) {
     if (!isLeetCodeProblemPage()) return;
 
     state.lastAction = 'save';
+    state.isAutoSave = isAuto;
     state.status = 'saving';
     state.errorMessage = '';
     clearAutoCloseTimer();
@@ -750,9 +772,93 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Autosave on Accepted
+  // ---------------------------------------------------------------------------
+  // We never poll the page for the word "Accepted" on its own — that text
+  // also shows up in the Submissions history tab, past-run panels, etc.
+  // Instead: arm a short watch window only right after we've seen the user
+  // click Submit ourselves, then look for the verdict panel to say Accepted
+  // within that window. This keeps autosave tied to an actual fresh
+  // submission rather than to stale "Accepted" text already on the page.
+
+  function clearAutoSaveArmTimer() {
+    if (state.autoSaveArmTimer !== null) {
+      clearTimeout(state.autoSaveArmTimer);
+      state.autoSaveArmTimer = null;
+    }
+  }
+
+  function armAutoSaveWatch() {
+    state.autoSaveArmed = true;
+    state.lastHandledResultNode = null;
+    clearAutoSaveArmTimer();
+    state.autoSaveArmTimer = setTimeout(() => {
+      state.autoSaveArmed = false;
+      state.autoSaveArmTimer = null;
+    }, AUTO_SAVE_ARM_TIMEOUT_MS);
+  }
+
+  function disarmAutoSaveWatch() {
+    state.autoSaveArmed = false;
+    clearAutoSaveArmTimer();
+  }
+
+  function findSubmissionResultElement() {
+    for (const selector of SUBMISSION_RESULT_SELECTORS) {
+      const element = document.querySelector(selector);
+      if (element) return element;
+    }
+    return null;
+  }
+
+  function checkForAcceptedVerdict() {
+    if (!state.autoSaveArmed) return;
+    if (!isLeetCodeProblemPage()) return;
+
+    const resultElement = findSubmissionResultElement();
+    if (!resultElement || resultElement === state.lastHandledResultNode) return;
+
+    const verdictText = resultElement.textContent?.trim();
+    if (verdictText !== ACCEPTED_VERDICT_TEXT) return;
+
+    // Found a fresh Accepted verdict following a submit click we saw.
+    state.lastHandledResultNode = resultElement;
+    disarmAutoSaveWatch();
+    performSave(true);
+  }
+
+  function handleSubmitButtonClick(event) {
+    const matchesSubmit = SUBMIT_BUTTON_SELECTORS.some((selector) => event.target.closest(selector));
+    if (!matchesSubmit) return;
+    if (!isLeetCodeProblemPage()) return;
+
+    armAutoSaveWatch();
+  }
+
+  function installAutoSaveWatcher() {
+    // Listen (capture phase) for Submit clicks anywhere on the page.
+    document.addEventListener('click', handleSubmitButtonClick, true);
+
+    // One long-lived observer watches for the verdict to appear/change,
+    // but only acts while a watch window is armed.
+    state.autoSaveObserver = new MutationObserver(() => {
+      checkForAcceptedVerdict();
+    });
+
+    const target = document.body || document.documentElement;
+    if (target) {
+      state.autoSaveObserver.observe(target, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+    }
+  }
+
   function handleRetry() {
     if (state.lastAction === 'save') {
-      performSave();
+      performSave(state.isAutoSave);
     } else {
       runLookup();
     }
@@ -795,6 +901,7 @@
 
     state.lastProblemPath = currentPath;
     goIdle();
+    disarmAutoSaveWatch(); // don't carry a Submit-click watch window across problems
 
     if (!isLeetCodeProblemPage()) return;
 
@@ -836,6 +943,7 @@
 
   function initializeContentScript() {
     installNavigationWatcher();
+    installAutoSaveWatcher();
 
     if (!isLeetCodeProblemPage()) return;
 
