@@ -15,7 +15,7 @@ const tokenCache = {
 let solutionsFolderIdPromise = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === 'LEETCODE_SOLUTION_ACCEPTED') {
+  if (message?.type === 'LEETCODE_SAVE_SOLUTION') {
     (async () => {
       try {
         const uploadResult = await saveSolutionToDrive(message.payload);
@@ -26,7 +26,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           webViewLink: uploadResult.webViewLink || null
         });
       } catch (error) {
-        console.error('[LeetCode Saver] Upload failed:', error);
+        console.error('[Retained] Upload failed:', error);
         sendResponse({
           ok: false,
           error: error?.message || 'Unknown Drive upload failure.'
@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           solution: solution || null
         });
       } catch (error) {
-        console.error('[LeetCode Saver] Saved-solution lookup failed:', error);
+        console.error('[Retained] Saved-solution lookup failed:', error);
         sendResponse({
           ok: false,
           found: false,
@@ -396,4 +396,4 @@ async function saveSolutionToDrive(payload) {
   });
 }
 
-console.info('[LeetCode Saver] Background service worker initialized. Add your Google OAuth client ID in manifest.json before loading the extension.');
+console.info('[Retained] Background service worker initialized.');

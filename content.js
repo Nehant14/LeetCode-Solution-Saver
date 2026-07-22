@@ -1,36 +1,27 @@
 (() => {
   'use strict';
 
-  const ACCEPTED_TEXT = 'Accepted';
   const PROBLEM_PATH_PATTERN = /^\/problems\/[^/]+/;
-  const POLL_INTERVAL_MS = 1000;
-  const ACCEPTED_DETECTION_DELAY_MS = 350;
+  const ROUTE_POLL_INTERVAL_MS = 1000;
   const EDITOR_WAIT_TIMEOUT_MS = 5000;
 
-  // How long to show the "Saved!" success modal before auto-closing
-  const SUCCESS_MODAL_AUTO_CLOSE_MS = 4000;
-  // How long to show the "No saved solution" notice before auto-closing
-  const MISSING_MODAL_AUTO_CLOSE_MS = 3000;
-  // How long to show an error modal before auto-closing
-  const ERROR_MODAL_AUTO_CLOSE_MS = 5000;
+  // How long transient toasts stay up before returning to the idle "Save" button
+  const PASTED_TOAST_MS = 2200;
+  const SAVE_SUCCESS_TOAST_MS = 3000;
+  const ERROR_TOAST_MS = 5000;
 
   const state = {
     lastProblemPath: location.pathname,
-    uploadInProgress: false,
-    acceptedScanScheduled: false,
-    pendingAcceptedMutation: false,
-    observer: null,
-    lookupRequestId: 0,
-    lookupKey: '',
-    // Possible statuses: 'idle' | 'loading' | 'saving' | 'found' | 'missing' | 'error' | 'save-success'
-    lookupStatus: 'idle',
-    errorMessage: '',
+    // 'idle' | 'checking' | 'found' | 'pasted' | 'not-found' | 'saving' | 'save-success' | 'error' | 'ready'
+    status: 'idle',
     savedSolution: null,
-    panelOpen: false,
+    errorMessage: '',
+    lastAction: null, // 'lookup' | 'save' — used to know what "Retry" should do
     uiHost: null,
     uiRoot: null,
     navigationWatcherInstalled: false,
-    autoCloseTimer: null
+    autoCloseTimer: null,
+    lookupRequestId: 0
   };
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -174,6 +165,15 @@
     return '';
   }
 
+  // Writes code into the active Monaco model, i.e. pastes it into the LeetCode editor.
+  function setEditorCode(code) {
+    const model = getEditorModel();
+    if (!model || typeof model.setValue !== 'function') {
+      throw new Error('Could not access the LeetCode editor to paste the saved solution.');
+    }
+    model.setValue(code);
+  }
+
   function getLanguageInfo() {
     const model = getEditorModel();
     const languageId = model?.getLanguageId?.() || '';
@@ -224,6 +224,7 @@
     };
   }
 
+  // Used right before an explicit Save click — waits briefly for the editor to be readable.
   async function waitForEditorData(timeoutMs = EDITOR_WAIT_TIMEOUT_MS) {
     const startedAt = Date.now();
 
@@ -245,7 +246,7 @@
       await wait(200);
     }
 
-    throw new Error('Timed out while reading the LeetCode editor state.');
+    throw new Error('Could not read your code from the editor. Make sure you have written a solution before saving.');
   }
 
   function escapeHtml(value) {
@@ -264,21 +265,12 @@
     }
   }
 
-  function scheduleAutoClose(ms) {
+  function scheduleAutoClose(ms, callback) {
     clearAutoCloseTimer();
     state.autoCloseTimer = setTimeout(() => {
       state.autoCloseTimer = null;
-      dismissUi();
+      callback();
     }, ms);
-  }
-
-  function dismissUi() {
-    clearAutoCloseTimer();
-    state.lookupStatus = 'idle';
-    state.panelOpen = false;
-    state.savedSolution = null;
-    state.errorMessage = '';
-    renderSolutionUi();
   }
 
   function ensureUiHost() {
@@ -286,7 +278,6 @@
       return state.uiHost;
     }
 
-    // Clean up stale host if it got detached
     if (state.uiHost && !state.uiHost.isConnected) {
       state.uiHost = null;
       state.uiRoot = null;
@@ -294,10 +285,13 @@
 
     const host = document.createElement('div');
     host.id = 'leetcode-drive-solution-overlay';
+    // No full-screen backdrop — this sits in the bottom-right corner only and
+    // never blocks interaction with the rest of the page.
     host.style.cssText = [
       'all:initial',
       'position:fixed',
-      'inset:0',
+      'right:20px',
+      'bottom:20px',
       'z-index:2147483647',
       'pointer-events:none'
     ].join(';');
@@ -313,38 +307,12 @@
     return host;
   }
 
-  function copyTextToClipboard(text) {
-    if (navigator.clipboard?.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-
-    return new Promise((resolve, reject) => {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.style.cssText = 'position:fixed;opacity:0';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-
-      try {
-        const success = document.execCommand('copy');
-        document.body.removeChild(textarea);
-        success ? resolve() : reject(new Error('Clipboard copy failed.'));
-      } catch (error) {
-        document.body.removeChild(textarea);
-        reject(error);
-      }
-    });
-  }
-
   // ---------------------------------------------------------------------------
-  // Render — the entire UI is rebuilt from state each time.
-  // Only one "mode" renders at a time based on state.lookupStatus.
+  // Render — the entire corner UI is rebuilt from state each time.
   // ---------------------------------------------------------------------------
-  function renderSolutionUi() {
-    const status = state.lookupStatus;
+  function renderUi() {
+    const status = state.status;
 
-    // 'idle' means nothing should be on screen — remove the host entirely.
     if (status === 'idle') {
       if (state.uiHost) {
         state.uiHost.remove();
@@ -359,137 +327,126 @@
     }
     if (!state.uiRoot) return;
 
-    const solutionName   = escapeHtml(state.savedSolution?.name || 'Saved solution');
-    const codeContent    = escapeHtml(state.savedSolution?.content || '');
-    const solutionLang   = escapeHtml(state.savedSolution?.extension || 'txt').toUpperCase();
-    const errorMsg       = escapeHtml(state.errorMessage || 'An unexpected error occurred.');
+    const problemTitle = escapeHtml(getProblemTitle());
+    const errorMsg = escapeHtml(state.errorMessage || 'An unexpected error occurred.');
 
-    // ---- Shared CSS ----
     const css = `
       :host { all: initial; }
 
-      /* Full-screen dimmed backdrop for modal states */
-      .backdrop {
-        position: fixed;
-        inset: 0;
-        background: rgba(4, 9, 18, 0.62);
-        backdrop-filter: blur(3px);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        pointer-events: auto;
-      }
-
-      /* Floating launcher badge (bottom-right) */
-      .corner-badge {
-        position: fixed;
-        right: 20px;
-        bottom: 20px;
-        pointer-events: auto;
-      }
-
-      /* ---- Modal card ---- */
-      .modal {
-        width: min(580px, calc(100vw - 32px));
-        max-height: min(80vh, 720px);
+      .card {
+        width: 300px;
         background: #0b1523;
         border: 1px solid rgba(99, 148, 210, 0.28);
-        border-radius: 20px;
-        box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
+        border-radius: 14px;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04);
         overflow: hidden;
-        display: flex;
-        flex-direction: column;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
         color: #dce8f5;
-        animation: pop-in 0.18s cubic-bezier(.34,1.56,.64,1) both;
+        pointer-events: auto;
+        animation: pop-in 0.16s cubic-bezier(.34,1.56,.64,1) both;
       }
 
       @keyframes pop-in {
-        from { opacity: 0; transform: scale(0.92) translateY(10px); }
-        to   { opacity: 1; transform: scale(1)    translateY(0);    }
+        from { opacity: 0; transform: scale(0.94) translateY(8px); }
+        to   { opacity: 1; transform: scale(1)    translateY(0);   }
       }
 
-      /* Header */
-      .modal-header {
+      .row {
         display: flex;
         align-items: flex-start;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 18px 20px 14px;
-        border-bottom: 1px solid rgba(99, 148, 210, 0.14);
-        flex-shrink: 0;
+        gap: 10px;
+        padding: 14px 14px 12px;
       }
-      .modal-icon {
-        width: 36px;
-        height: 36px;
-        border-radius: 10px;
+
+      .icon {
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 18px;
+        font-size: 15px;
         flex-shrink: 0;
       }
-      .modal-icon.saving  { background: rgba(59, 130, 246, 0.18); }
-      .modal-icon.loading { background: rgba(99, 179, 237, 0.16); }
-      .modal-icon.success { background: rgba(52, 211, 153, 0.16); }
-      .modal-icon.missing { background: rgba(251, 191, 36, 0.14); }
-      .modal-icon.error   { background: rgba(248, 113, 113, 0.16); }
+      .icon.info    { background: rgba(99, 179, 237, 0.16); }
+      .icon.success { background: rgba(52, 211, 153, 0.16); }
+      .icon.warn    { background: rgba(251, 191, 36, 0.14); }
+      .icon.error   { background: rgba(248, 113, 113, 0.16); }
 
-      .modal-title-block { min-width: 0; flex: 1; }
-      .modal-kicker {
-        font-size: 11px;
+      .text-block { min-width: 0; flex: 1; }
+      .kicker {
+        font-size: 10.5px;
         text-transform: uppercase;
-        letter-spacing: 0.14em;
+        letter-spacing: 0.12em;
         color: rgba(148, 163, 184, 0.8);
-        margin-bottom: 4px;
+        margin-bottom: 3px;
       }
-      .modal-title {
-        font-size: 15px;
+      .title {
+        font-size: 13.5px;
         font-weight: 700;
         color: #f1f8ff;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        line-height: 1.35;
+      }
+      .subtitle {
+        font-size: 12.5px;
+        color: rgba(203, 213, 225, 0.85);
+        line-height: 1.4;
+        margin-top: 3px;
       }
 
       .close-btn {
         appearance: none;
         border: none;
-        background: rgba(148, 163, 184, 0.1);
-        color: rgba(203, 213, 225, 0.7);
-        border-radius: 8px;
-        width: 28px;
-        height: 28px;
+        background: transparent;
+        color: rgba(203, 213, 225, 0.55);
+        border-radius: 6px;
+        width: 22px;
+        height: 22px;
         cursor: pointer;
-        font-size: 16px;
+        font-size: 14px;
         line-height: 1;
+        flex-shrink: 0;
         display: flex;
         align-items: center;
         justify-content: center;
-        flex-shrink: 0;
-        transition: background 0.1s;
       }
-      .close-btn:hover { background: rgba(148, 163, 184, 0.22); color: #f1f5f9; }
+      .close-btn:hover { background: rgba(148, 163, 184, 0.16); color: #f1f5f9; }
 
-      /* Body */
-      .modal-body {
-        padding: 16px 20px 20px;
-        overflow: auto;
+      .footer {
+        display: flex;
+        gap: 8px;
+        padding: 0 14px 14px;
+      }
+
+      .btn {
+        appearance: none;
+        border: none;
+        border-radius: 9px;
+        padding: 8px 14px;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
         flex: 1;
+        font-family: inherit;
       }
+      .btn-primary { background: #3b82f6; color: #fff; }
+      .btn-primary:hover { background: #2563eb; }
+      .btn-ghost {
+        background: rgba(30, 41, 59, 0.8);
+        color: #e2e8f0;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+      }
+      .btn-ghost:hover { border-color: rgba(148, 163, 184, 0.4); }
 
-      /* Spinner */
       .spinner-row {
         display: flex;
         align-items: center;
-        gap: 12px;
-        color: rgba(203, 213, 225, 0.85);
-        font-size: 13.5px;
+        gap: 10px;
       }
       .spinner {
-        width: 20px;
-        height: 20px;
-        border: 2.5px solid rgba(99, 148, 210, 0.25);
+        width: 16px;
+        height: 16px;
+        border: 2px solid rgba(99, 148, 210, 0.25);
         border-top-color: #60a5fa;
         border-radius: 50%;
         animation: spin 0.75s linear infinite;
@@ -497,105 +454,7 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
 
-      /* Success / missing / error banners */
-      .banner {
-        display: flex;
-        align-items: flex-start;
-        gap: 10px;
-        padding: 12px 14px;
-        border-radius: 12px;
-        font-size: 13.5px;
-        line-height: 1.5;
-      }
-      .banner.success { background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.22); color: #a7f3d0; }
-      .banner.missing { background: rgba(251, 191, 36, 0.09); border: 1px solid rgba(251, 191, 36, 0.2);  color: #fde68a; }
-      .banner.error   { background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.22); color: #fca5a5; }
-      .banner-icon { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
-
-      /* Code block */
-      .code-meta {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        margin-bottom: 10px;
-        margin-top: 14px;
-      }
-      .lang-badge {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        padding: 3px 9px;
-        border-radius: 6px;
-        background: rgba(96, 165, 250, 0.14);
-        color: #93c5fd;
-        border: 1px solid rgba(96, 165, 250, 0.22);
-      }
-      .copy-btn {
-        appearance: none;
-        border: 1px solid rgba(148, 163, 184, 0.22);
-        background: rgba(30, 41, 59, 0.9);
-        color: #e2e8f0;
-        border-radius: 8px;
-        padding: 5px 12px;
-        font-size: 12px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      .copy-btn:hover { border-color: rgba(148, 163, 184, 0.44); }
-
-      .code-block {
-        margin: 0;
-        white-space: pre;
-        overflow: auto;
-        padding: 14px 16px;
-        border-radius: 12px;
-        border: 1px solid rgba(94, 112, 136, 0.2);
-        background: #060e1a;
-        color: #e2eaf4;
-        font: 13px/1.65 Consolas, 'SFMono-Regular', Menlo, Monaco, monospace;
-        tab-size: 2;
-        max-height: 420px;
-      }
-
-      /* Footer action row */
-      .modal-footer {
-        padding: 12px 20px 16px;
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 8px;
-        border-top: 1px solid rgba(99, 148, 210, 0.1);
-        flex-shrink: 0;
-      }
-      .btn-primary {
-        appearance: none;
-        border: none;
-        background: linear-gradient(135deg, #2563eb, #1d4ed8);
-        color: #fff;
-        border-radius: 10px;
-        padding: 8px 18px;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-        box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
-      }
-      .btn-primary:hover { background: linear-gradient(135deg, #3b82f6, #2563eb); }
-      .btn-ghost {
-        appearance: none;
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        background: rgba(30, 41, 59, 0.8);
-        color: #e2e8f0;
-        border-radius: 10px;
-        padding: 8px 16px;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-      .btn-ghost:hover { border-color: rgba(148, 163, 184, 0.4); }
-
-      /* Launcher badge */
+      /* Persistent floating Save pill (the 'ready' state) */
       .launcher {
         appearance: none;
         border: 1px solid rgba(99, 148, 210, 0.3);
@@ -607,243 +466,165 @@
         cursor: pointer;
         display: inline-flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         font-size: 13px;
         font-weight: 600;
-        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-        letter-spacing: 0.01em;
-        transition: transform 0.12s, border-color 0.12s;
+        font-family: inherit;
         pointer-events: auto;
+        transition: transform 0.12s, border-color 0.12s;
       }
       .launcher:hover { transform: translateY(-1px); border-color: rgba(139, 191, 255, 0.5); }
-      .launcher-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 6px #34d399; }
     `;
 
-    // ---- Build inner HTML based on status ----
     let inner = '';
 
-    if (status === 'saving') {
-      // Modal: uploading to Drive
+    if (status === 'checking') {
       inner = `
-        <div class="backdrop" data-action="backdrop-noop">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="Saving solution to Google Drive">
-            <div class="modal-header">
-              <div class="modal-icon saving">💾</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive</div>
-                <div class="modal-title">Saving accepted solution…</div>
-              </div>
-            </div>
-            <div class="modal-body">
+        <div class="card">
+          <div class="row">
+            <div class="icon info">🔍</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
               <div class="spinner-row">
                 <div class="spinner"></div>
-                <span>Uploading your accepted code to the <strong>LeetCode-Solutions</strong> folder on Google Drive. This usually takes a moment.</span>
+                <span class="title" style="font-weight:600;">Checking for a saved solution…</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (status === 'found') {
+      inner = `
+        <div class="card">
+          <div class="row">
+            <div class="icon success">📄</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="title">Solution available</div>
+              <div class="subtitle">A saved solution for "${problemTitle}" was found. Paste it into the editor?</div>
+            </div>
+            <button class="close-btn" type="button" data-action="paste-no" aria-label="Dismiss">✕</button>
+          </div>
+          <div class="footer">
+            <button class="btn btn-ghost" type="button" data-action="paste-no">No</button>
+            <button class="btn btn-primary" type="button" data-action="paste-yes">Yes, paste it</button>
+          </div>
+        </div>
+      `;
+    } else if (status === 'pasted') {
+      inner = `
+        <div class="card">
+          <div class="row">
+            <div class="icon success">✅</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="title">Pasted into the editor</div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (status === 'not-found') {
+      inner = `
+        <div class="card">
+          <div class="row">
+            <div class="icon warn">📭</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="title">No saved solution found</div>
+              <div class="subtitle">Write your solution, then save it to your LeetCode-Solutions folder whenever you're ready.</div>
+            </div>
+            <button class="close-btn" type="button" data-action="dismiss" aria-label="Dismiss">✕</button>
+          </div>
+          <div class="footer">
+            <button class="btn btn-primary" type="button" data-action="save">💾 Save Solution</button>
+          </div>
+        </div>
+      `;
+    } else if (status === 'saving') {
+      inner = `
+        <div class="card">
+          <div class="row">
+            <div class="icon info">💾</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="spinner-row">
+                <div class="spinner"></div>
+                <span class="title" style="font-weight:600;">Saving to Drive…</span>
               </div>
             </div>
           </div>
         </div>
       `;
     } else if (status === 'save-success') {
-      // Modal: upload succeeded
       inner = `
-        <div class="backdrop" data-action="backdrop-dismiss">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="Solution saved">
-            <div class="modal-header">
-              <div class="modal-icon success">✅</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive</div>
-                <div class="modal-title">${solutionName}</div>
-              </div>
-              <button class="close-btn" type="button" data-action="dismiss" aria-label="Close">✕</button>
-            </div>
-            <div class="modal-body">
-              <div class="banner success">
-                <span class="banner-icon">🎉</span>
-                <span>Solution saved to your <strong>LeetCode-Solutions</strong> folder on Google Drive.</span>
-              </div>
-              ${codeContent ? `
-                <div class="code-meta">
-                  <span class="lang-badge">${solutionLang}</span>
-                  <button class="copy-btn" type="button" data-action="copy-code">Copy to clipboard</button>
-                </div>
-                <pre class="code-block">${codeContent}</pre>
-              ` : ''}
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" data-action="dismiss">Close</button>
-            </div>
-          </div>
-        </div>
-      `;
-    } else if (status === 'loading') {
-      // Modal: looking up a previously-saved solution
-      inner = `
-        <div class="backdrop" data-action="backdrop-noop">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="Looking up saved solution">
-            <div class="modal-header">
-              <div class="modal-icon loading">🔍</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive</div>
-                <div class="modal-title">Checking for a saved solution…</div>
-              </div>
-            </div>
-            <div class="modal-body">
-              <div class="spinner-row">
-                <div class="spinner"></div>
-                <span>Searching your <strong>LeetCode-Solutions</strong> folder on Google Drive.</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-    } else if (status === 'found' && state.panelOpen) {
-      // Modal: solution found — show the code
-      inner = `
-        <div class="backdrop" data-action="backdrop-dismiss">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="Saved Drive solution">
-            <div class="modal-header">
-              <div class="modal-icon success">📄</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive · Saved solution</div>
-                <div class="modal-title">${solutionName}</div>
-              </div>
-              <button class="close-btn" type="button" data-action="dismiss" aria-label="Close">✕</button>
-            </div>
-            <div class="modal-body">
-              <div class="code-meta">
-                <span class="lang-badge">${solutionLang}</span>
-                <button class="copy-btn" type="button" data-action="copy-code">Copy to clipboard</button>
-              </div>
-              <pre class="code-block">${codeContent}</pre>
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" data-action="dismiss">Close</button>
-            </div>
-          </div>
-        </div>
-      `;
-    } else if (status === 'found' && !state.panelOpen) {
-      // Compact launcher badge — user closed the modal but can reopen it
-      inner = `
-        <div class="corner-badge">
-          <button class="launcher" type="button" data-action="toggle-panel">
-            <span class="launcher-dot"></span>
-            <span>View Saved Drive Solution</span>
-            <span style="opacity:0.65;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;">${solutionLang}</span>
-          </button>
-        </div>
-      `;
-    } else if (status === 'missing') {
-      // Modal: no saved solution found
-      inner = `
-        <div class="backdrop" data-action="backdrop-dismiss">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="No saved solution">
-            <div class="modal-header">
-              <div class="modal-icon missing">📭</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive</div>
-                <div class="modal-title">No saved solution found</div>
-              </div>
-              <button class="close-btn" type="button" data-action="dismiss" aria-label="Close">✕</button>
-            </div>
-            <div class="modal-body">
-              <div class="banner missing">
-                <span class="banner-icon">ℹ️</span>
-                <span>No previously saved solution was found for this problem in your <strong>LeetCode-Solutions</strong> folder. Submit an accepted solution to save one.</span>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" data-action="dismiss">Dismiss</button>
+        <div class="card">
+          <div class="row">
+            <div class="icon success">✅</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="title">Solution saved successfully!</div>
             </div>
           </div>
         </div>
       `;
     } else if (status === 'error') {
-      // Modal: something went wrong
       inner = `
-        <div class="backdrop" data-action="backdrop-dismiss">
-          <div class="modal" role="dialog" aria-modal="true" aria-label="Error">
-            <div class="modal-header">
-              <div class="modal-icon error">⚠️</div>
-              <div class="modal-title-block">
-                <div class="modal-kicker">Google Drive</div>
-                <div class="modal-title">Something went wrong</div>
-              </div>
-              <button class="close-btn" type="button" data-action="dismiss" aria-label="Close">✕</button>
+        <div class="card">
+          <div class="row">
+            <div class="icon error">⚠️</div>
+            <div class="text-block">
+              <div class="kicker">Google Drive</div>
+              <div class="title">Something went wrong</div>
+              <div class="subtitle">${errorMsg}</div>
             </div>
-            <div class="modal-body">
-              <div class="banner error">
-                <span class="banner-icon">❌</span>
-                <span>${errorMsg}</span>
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" data-action="dismiss">Dismiss</button>
-            </div>
+            <button class="close-btn" type="button" data-action="dismiss" aria-label="Dismiss">✕</button>
+          </div>
+          <div class="footer">
+            <button class="btn btn-ghost" type="button" data-action="dismiss">Dismiss</button>
+            <button class="btn btn-primary" type="button" data-action="retry">Retry</button>
           </div>
         </div>
+      `;
+    } else if (status === 'ready') {
+      inner = `
+        <button class="launcher" type="button" data-action="save">
+          <span>💾</span>
+          <span>Save Solution</span>
+        </button>
       `;
     }
 
     state.uiRoot.innerHTML = `<style>${css}</style>${inner}`;
   }
 
-  async function handleUiClick(event) {
-    const target = event.target;
-
-    // Clicking the dimmed backdrop dismisses the modal (except during active operations)
-    const backdrop = target.closest('[data-action="backdrop-dismiss"]');
-    if (backdrop && target === backdrop) {
-      dismissUi();
-      return;
-    }
-
-    const button = target.closest('button[data-action]');
-    if (!button) return;
-
-    const action = button.dataset.action;
-
-    if (action === 'dismiss') {
-      dismissUi();
-      return;
-    }
-
-    if (action === 'toggle-panel') {
-      state.panelOpen = true;
-      renderSolutionUi();
-      return;
-    }
-
-    if (action === 'copy-code' && state.savedSolution?.content) {
-      try {
-        await copyTextToClipboard(state.savedSolution.content);
-        button.textContent = '✓ Copied!';
-        setTimeout(() => {
-          if (button.isConnected) button.textContent = 'Copy to clipboard';
-        }, 1400);
-      } catch (error) {
-        console.error('[LeetCode Saver] Copy failed:', error);
-      }
-    }
+  // ---------------------------------------------------------------------------
+  // State transitions
+  // ---------------------------------------------------------------------------
+  function goReady() {
+    clearAutoCloseTimer();
+    state.status = 'ready';
+    state.savedSolution = null;
+    state.errorMessage = '';
+    renderUi();
   }
 
-  async function requestSavedSolutionLookup({ keepPanelOpen = false } = {}) {
+  function goIdle() {
+    clearAutoCloseTimer();
+    state.status = 'idle';
+    state.savedSolution = null;
+    state.errorMessage = '';
+    renderUi();
+  }
+
+  async function runLookup() {
     if (!isLeetCodeProblemPage()) return;
 
-    const lookupKey = `${getNormalizedProblemPath()}::${buildLookupPayload().preferredExtension}`;
-
-    // Already have the result cached — nothing to do
-    if (state.lookupKey === lookupKey && state.lookupStatus === 'found' && state.savedSolution) {
-      return;
-    }
-
-    state.lookupKey = lookupKey;
-    state.lookupStatus = 'loading';
-    state.panelOpen = keepPanelOpen;
+    state.lastAction = 'lookup';
+    state.status = 'checking';
     state.savedSolution = null;
     state.errorMessage = '';
     clearAutoCloseTimer();
-    renderSolutionUi();
+    renderUi();
 
     const requestId = ++state.lookupRequestId;
 
@@ -857,191 +638,147 @@
 
       if (response?.ok && response?.found && response?.solution?.content) {
         state.savedSolution = response.solution;
-        state.lookupStatus = 'found';
-        state.panelOpen = true;
-        renderSolutionUi();
+        state.status = 'found';
+        renderUi();
         return;
       }
 
       if (response?.ok && !response?.found) {
-        state.lookupStatus = 'missing';
-        state.savedSolution = null;
-        renderSolutionUi();
-        scheduleAutoClose(MISSING_MODAL_AUTO_CLOSE_MS);
+        state.status = 'not-found';
+        renderUi();
         return;
       }
 
-      // Service returned ok:false
-      state.lookupStatus = 'error';
+      state.status = 'error';
       state.errorMessage = response?.error || 'Drive lookup failed. Check the extension console for details.';
-      state.savedSolution = null;
-      console.error('[LeetCode Saver] Lookup returned an error:', state.errorMessage);
-      renderSolutionUi();
-      scheduleAutoClose(ERROR_MODAL_AUTO_CLOSE_MS);
+      console.error('[Retained] Lookup returned an error:', state.errorMessage);
+      renderUi();
+      scheduleAutoClose(ERROR_TOAST_MS, goReady);
     } catch (error) {
       if (requestId !== state.lookupRequestId) return;
 
-      state.lookupStatus = 'error';
+      state.status = 'error';
       state.errorMessage = error?.message || 'Drive lookup failed. Check the extension console for details.';
-      state.savedSolution = null;
-      console.error('[LeetCode Saver] Saved-solution lookup failed:', error);
-      renderSolutionUi();
-      scheduleAutoClose(ERROR_MODAL_AUTO_CLOSE_MS);
+      console.error('[Retained] Saved-solution lookup failed:', error);
+      renderUi();
+      scheduleAutoClose(ERROR_TOAST_MS, goReady);
     }
   }
 
-  function isGreenishColor(color) {
-    const match = String(color || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-    if (!match) return false;
-
-    const red   = Number(match[1]);
-    const green = Number(match[2]);
-    const blue  = Number(match[3]);
-    return green > red + 20 && green > blue + 20;
-  }
-
-  function nodeContainsAcceptedIndicator(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
-
-    const text = node.textContent || '';
-    if (!text.includes(ACCEPTED_TEXT)) return false;
-
-    const computedStyle = window.getComputedStyle(node);
-    const className     = String(node.className || '').toLowerCase();
-    const successHint   = /success|accepted|green|text-green|bg-green/.test(className);
-
-    return successHint
-      || isGreenishColor(computedStyle.color)
-      || isGreenishColor(computedStyle.backgroundColor);
-  }
-
-  function mutationMentionsAcceptance(mutation) {
-    for (const node of mutation.addedNodes || []) {
-      if (nodeContainsAcceptedIndicator(node)) return true;
-      if (node.nodeType === Node.ELEMENT_NODE && node.textContent?.includes(ACCEPTED_TEXT)) return true;
+  async function handlePasteYes() {
+    if (!state.savedSolution?.content) {
+      goReady();
+      return;
     }
 
-    if (mutation.type === 'characterData') {
-      if ((mutation.target?.data || '').includes(ACCEPTED_TEXT)) return true;
-    }
-
-    return false;
-  }
-
-  function scheduleAcceptedScan() {
-    if (state.acceptedScanScheduled) return;
-    state.acceptedScanScheduled = true;
-
-    queueMicrotask(async () => {
-      state.acceptedScanScheduled = false;
-
-      try {
-        await wait(ACCEPTED_DETECTION_DELAY_MS);
-
-        if (!isLeetCodeProblemPage() || state.uploadInProgress || !state.pendingAcceptedMutation) {
-          return;
-        }
-
-        state.pendingAcceptedMutation = false;
-        state.uploadInProgress = true;
-        state.lookupStatus = 'saving';   // NEW: distinct "saving" status
-        state.panelOpen = true;
-        state.savedSolution = null;
-        state.errorMessage = '';
-        clearAutoCloseTimer();
-        renderSolutionUi();
-
-        const payload = await waitForEditorData();
-
-        const response = await chrome.runtime.sendMessage({
-          type: 'LEETCODE_SOLUTION_ACCEPTED',
-          payload
-        });
-
-        if (!response?.ok) {
-          throw new Error(response?.error || 'Drive upload failed.');
-        }
-
-        console.info('[LeetCode Saver] Solution uploaded to Google Drive:', response.fileName);
-        state.uploadInProgress = false;
-        state.pendingAcceptedMutation = false;
-
-        // Fetch the just-uploaded file so we can display its content in the success modal
-        await requestSavedSolutionLookup({ keepPanelOpen: true });
-
-        // If lookup succeeded, switch to save-success view; otherwise leave whatever status lookup set
-        if (state.lookupStatus === 'found') {
-          state.lookupStatus = 'save-success';
-          renderSolutionUi();
-          scheduleAutoClose(SUCCESS_MODAL_AUTO_CLOSE_MS);
-        }
-      } catch (error) {
-        state.uploadInProgress = false;
-        state.lookupStatus = 'error';
-        state.savedSolution = null;
-        state.errorMessage = error?.message || 'Failed to save the solution to Google Drive.';
-        renderSolutionUi();
-        scheduleAutoClose(ERROR_MODAL_AUTO_CLOSE_MS);
-        console.error('[LeetCode Saver] Unable to save accepted solution:', error);
-      }
-    });
-  }
-
-  function attachObserver() {
-    if (state.observer) {
-      state.observer.disconnect();
-    }
-
-    state.observer = new MutationObserver((mutations) => {
-      if (!isLeetCodeProblemPage()) return;
-
-      for (const mutation of mutations) {
-        if (mutationMentionsAcceptance(mutation)) {
-          state.pendingAcceptedMutation = true;
-          scheduleAcceptedScan();
-          break;
-        }
-      }
-    });
-
-    const target = document.documentElement || document.body;
-    if (target) {
-      state.observer.observe(target, {
-        subtree: true,
-        childList: true,
-        characterData: true
-      });
+    try {
+      setEditorCode(state.savedSolution.content);
+      state.status = 'pasted';
+      renderUi();
+      scheduleAutoClose(PASTED_TOAST_MS, goReady);
+    } catch (error) {
+      state.status = 'error';
+      state.errorMessage = error?.message || 'Failed to paste the solution into the editor.';
+      console.error('[Retained] Paste into editor failed:', error);
+      renderUi();
+      scheduleAutoClose(ERROR_TOAST_MS, goReady);
     }
   }
 
-  function resetForRouteChange() {
-    const currentPath = getNormalizedProblemPath();
-    if (currentPath !== state.lastProblemPath) {
-      state.lastProblemPath = currentPath;
-      state.uploadInProgress = false;
-      state.pendingAcceptedMutation = false;
-    }
+  function handlePasteNo() {
+    goReady();
   }
 
-  function startRouteWatcher() {
-    setInterval(() => { resetForRouteChange(); }, POLL_INTERVAL_MS);
-  }
+  // Only ever called from an explicit user click (the Save button) — never automatically.
+  async function performSave() {
+    if (!isLeetCodeProblemPage()) return;
 
-  function handleRouteChange() {
-    resetForRouteChange();
-    clearAutoCloseTimer();
-
-    // BUG FIX: always reset to idle on route change so stale UI is removed
-    state.lookupStatus = 'idle';
-    state.savedSolution = null;
-    state.lookupKey = '';
-    state.panelOpen = false;
+    state.lastAction = 'save';
+    state.status = 'saving';
     state.errorMessage = '';
-    renderSolutionUi();  // removes UI host because status is 'idle'
+    clearAutoCloseTimer();
+    renderUi();
+
+    try {
+      const payload = await waitForEditorData();
+
+      const response = await chrome.runtime.sendMessage({
+        type: 'LEETCODE_SAVE_SOLUTION',
+        payload
+      });
+
+      if (!response?.ok) {
+        throw new Error(response?.error || 'Drive upload failed.');
+      }
+
+      console.info('[Retained] Solution uploaded to Google Drive:', response.fileName);
+      state.status = 'save-success';
+      renderUi();
+      scheduleAutoClose(SAVE_SUCCESS_TOAST_MS, goReady);
+    } catch (error) {
+      state.status = 'error';
+      state.errorMessage = error?.message || 'Failed to save the solution to Google Drive.';
+      console.error('[Retained] Save failed:', error);
+      renderUi();
+      scheduleAutoClose(ERROR_TOAST_MS, goReady);
+    }
+  }
+
+  function handleRetry() {
+    if (state.lastAction === 'save') {
+      performSave();
+    } else {
+      runLookup();
+    }
+  }
+
+  async function handleUiClick(event) {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+
+    const action = button.dataset.action;
+
+    if (action === 'dismiss') {
+      goReady();
+      return;
+    }
+    if (action === 'retry') {
+      handleRetry();
+      return;
+    }
+    if (action === 'paste-yes') {
+      await handlePasteYes();
+      return;
+    }
+    if (action === 'paste-no') {
+      handlePasteNo();
+      return;
+    }
+    if (action === 'save') {
+      await performSave();
+      return;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Route / navigation handling
+  // ---------------------------------------------------------------------------
+  function handleRouteChange() {
+    const currentPath = getNormalizedProblemPath();
+    if (currentPath === state.lastProblemPath) return;
+
+    state.lastProblemPath = currentPath;
+    goIdle();
 
     if (!isLeetCodeProblemPage()) return;
 
-    requestSavedSolutionLookup();
+    runLookup();
+  }
+
+  function startRouteWatcher() {
+    // Belt-and-suspenders alongside the pushState/replaceState patch below —
+    // LeetCode's client-side routing doesn't always go through those hooks.
+    setInterval(handleRouteChange, ROUTE_POLL_INTERVAL_MS);
   }
 
   function installNavigationWatcher() {
@@ -1052,7 +789,7 @@
       window.dispatchEvent(new Event('leetcode-locationchange'));
     };
 
-    const originalPushState    = history.pushState;
+    const originalPushState = history.pushState;
     const originalReplaceState = history.replaceState;
 
     history.pushState = function pushStatePatched(...args) {
@@ -1076,9 +813,8 @@
 
     if (!isLeetCodeProblemPage()) return;
 
-    attachObserver();
     startRouteWatcher();
-    requestSavedSolutionLookup();
+    runLookup();
   }
 
   if (document.readyState === 'loading') {

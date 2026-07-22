@@ -1,23 +1,45 @@
-# LeetCode to Google Drive Saver
+# Retained — LeetCode → Google Drive
 
-Manifest V3 Chrome extension that watches LeetCode problem pages, and when you get an **Accepted** verdict, automatically uploads your solution to a `LeetCode-Solutions` folder in your Google Drive. It also shows you any previously-saved solution for a problem when you revisit it.
+Manifest V3 Chrome extension that saves your accepted LeetCode solutions to a
+`LeetCode-Solutions` folder in Google Drive, and offers to restore a saved
+solution when you revisit a problem — **entirely on your terms**, via explicit
+buttons. Nothing is saved or pasted automatically.
 
 ## Files
 
-- `manifest.json` — extension manifest and OAuth2 config
-- `content.js` — detects an accepted submission, extracts title/language/code, and renders the on-page status UI
+- `manifest.template.json` — tracked in git; the real `manifest.json` (with your OAuth client ID) is generated from this and is gitignored
+- `scripts/build-manifest.js` — generates `manifest.json` from `.env` + the template
+- `.env.example` — copy to `.env` and fill in your own OAuth client ID
+- `content.js` — runs the bottom-right corner UI, the Drive lookup, and the manual save/paste flow
 - `background.js` — authenticates with Google Drive and uploads/looks up solutions
 - `icons/` — toolbar icon
 
+## How it behaves
+
+- **On opening a problem page:** the extension checks Drive for a saved solution. A small "Checking for a saved solution…" indicator appears in the **bottom-right corner** (never full-screen, never blocking the page).
+  - **Found:** a bottom-right card says "Solution available" and asks *"Paste it into the editor?"* with **Yes** / **No** buttons. Nothing is pasted unless you click **Yes**.
+  - **Not found:** a bottom-right card says "No saved solution found" with a **💾 Save Solution** button.
+- **Saving is always manual.** The extension never watches for an "Accepted" verdict and never saves automatically — it only uploads when you click **Save Solution**. That button is always available in the bottom-right corner (as a small floating pill once you've dismissed the lookup card), so you can save whenever you feel your solution is actually ready.
+- **On save:** a "Saving to Drive…" indicator appears, followed by "Solution saved successfully!", both in the same corner.
+
 ## Why it doesn't work "out of the box"
 
-The code itself is complete and functional — the reason a freshly cloned copy of this repo won't work is that **Google OAuth client IDs are tied to a specific extension ID**. The client ID that used to be hard-coded in `manifest.json` belonged to the original author's own local copy of the extension and will never authenticate for anyone else's install — Chrome's `chrome.identity.getAuthToken` call will silently fail (or show an "OAuth2 request failed" / "bad client id" error) because your unpacked extension gets a *different* auto-generated ID than theirs.
+The code itself is complete and functional — the reason a freshly cloned copy of this repo won't work is that **Google OAuth client IDs are tied to a specific extension ID**. A client ID generated for one person's local unpacked copy will never authenticate for anyone else's install — Chrome's `chrome.identity.getAuthToken` call will silently fail (or show an "OAuth2 request failed" / "bad client id" error) because your unpacked extension gets a *different* auto-generated ID than theirs.
 
-This isn't something that can be fixed by editing the code — you need to create your **own** OAuth client. It only takes a few minutes. Follow these steps exactly and it will work.
+This isn't something that can be fixed by editing the code — you need to create your **own** OAuth client and keep it out of git (see setup below). It only takes a few minutes.
 
 ## Setup (required, one-time)
 
 ### 1. Load the unpacked extension first (to get its ID)
+
+You need a `manifest.json` to load the extension at all, even before OAuth works. Generate a placeholder one now:
+
+```bash
+cp .env.example .env
+node scripts/build-manifest.js
+```
+
+This writes `manifest.json` (gitignored — it will contain your real client ID once you fill in `.env`, so it never gets committed). For now it'll have a placeholder value, which is fine for this step.
 
 1. Open `chrome://extensions/`.
 2. Enable **Developer mode** (top-right toggle).
@@ -38,34 +60,38 @@ This isn't something that can be fixed by editing the code — you need to creat
    - Item ID: paste the Extension ID you copied in step 1.
    - Create → copy the generated **Client ID** (ends in `.apps.googleusercontent.com`).
 
-### 3. Wire the client ID into the extension
+### 3. Put the client ID in `.env`
 
-Open `manifest.json` and replace the placeholder:
+Open `.env` (created in step 1) and set:
 
-```json
-"oauth2": {
-  "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
-  "scopes": ["https://www.googleapis.com/auth/drive.file"]
-}
+```
+GOOGLE_OAUTH_CLIENT_ID=YOUR_REAL_CLIENT_ID.apps.googleusercontent.com
 ```
 
-with your real client ID from step 2.
+Then regenerate `manifest.json`:
+
+```bash
+node scripts/build-manifest.js
+```
+
+`.env` and `manifest.json` are both gitignored, so your client ID never gets committed.
 
 ### 4. Reload the extension
 
 Back on `chrome://extensions/`, click the reload icon on the extension's card so it picks up the new `manifest.json`.
 
-> Note: the Extension ID normally stays stable for a given unpacked folder path on your machine, so you shouldn't need to redo step 1/2 after this — just reload after any code changes. If you ever move the folder to a new path or a different machine, Chrome may assign a new ID and you'll need to add that ID to the same OAuth client (Credentials → your client → Item ID can only hold one ID, so create a new OAuth client instead, or reuse it by re-registering).
+> Note: the Extension ID normally stays stable for a given unpacked folder path on your machine, so you shouldn't need to redo step 1/2 after this — just rerun `node scripts/build-manifest.js` and reload after any `.env` or code changes. If you ever move the folder to a new path or a different machine, Chrome may assign a new ID and you'll need to add that ID to the same OAuth client (Credentials → your client → Item ID can only hold one ID, so create a new OAuth client instead, or reuse it by re-registering).
 
 ## Using it
 
 1. Go to any `https://leetcode.com/problems/...` page.
-2. On first load, you'll see a small popup asking you to sign in with Google and grant Drive access — this happens automatically the first time you submit an accepted solution (or when it checks for an existing saved one).
-3. Submit a solution and get **Accepted** — the extension detects it, shows a "Saving…" modal, and uploads the code as a file (e.g. `Two-Sum.cpp`) into a `LeetCode-Solutions` folder in your Drive.
-4. Revisit a problem you've already solved — it automatically looks up and shows your saved solution, with a "Copy to clipboard" button.
+2. On first load, you'll see a small popup asking you to sign in with Google and grant Drive access — this happens automatically the first time the extension checks for or saves a solution.
+3. The extension checks Drive for a saved solution (bottom-right indicator). If one exists, it asks whether to paste it into the editor — nothing is pasted without your say-so.
+4. Write your solution. When you're ready, click **💾 Save Solution** (bottom-right) to upload it — it's never saved automatically, even after an Accepted verdict.
 
 ## Notes
 
 - Uses the narrower `drive.file` scope (not full `drive` access) — the extension can only see/manage files and folders it creates itself, not your entire Drive.
 - If you ever revoke access, just reload the page and re-authenticate when prompted.
 - If uploads/lookups stop working, open the extension's service worker console (`chrome://extensions/` → "service worker" link on the card) to see the actual error — most issues at that point are auth-related (client ID / test user list) rather than code bugs.
+- If you previously had a real OAuth client ID committed in `manifest.json` in git history, rotate it in Google Cloud Console (delete the old credential, create a new one) now that it's out of the tracked files.
