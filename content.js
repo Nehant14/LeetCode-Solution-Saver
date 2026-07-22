@@ -67,7 +67,13 @@
   }
 
   function getNormalizedProblemPath() {
-    return location.pathname.replace(/\/+$/, '');
+
+    // Only the /problems/<slug> portion matters — LeetCode's Editorial,
+    // Submissions, Solutions, etc. tabs change the pathname's suffix
+    // (e.g. /problems/two-sum/editorial/) without it being a new problem.
+    // so without this change, it checks for saved solution again and again when we click on these buttons
+    const match = location.pathname.match(/^\/problems\/([^/]+)/);
+    return match ? `/problems/${match[1]}` : location.pathname.replace(/\/+$/, '');
   }
 
   function getProblemTitle() {
