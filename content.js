@@ -26,6 +26,42 @@
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  // ---------------------------------------------------------------------------
+  // Bridge to page-bridge.js, which runs in the page's own ("MAIN") JS world.
+  // content.js runs isolated and cannot see window.monaco directly, so any
+  // read/write against the Monaco editor has to go through this bridge.
+  // ---------------------------------------------------------------------------
+  let bridgeRequestCounter = 0;
+
+  function callPageBridge(action, payload, timeoutMs = 1500) {
+    return new Promise((resolve, reject) => {
+      const requestId = `retained-${Date.now()}-${++bridgeRequestCounter}`;
+
+      const cleanup = () => {
+        window.removeEventListener('retained:response', onResponse);
+        clearTimeout(timer);
+      };
+
+      const onResponse = (event) => {
+        if (event.detail?.requestId !== requestId) return;
+        cleanup();
+        if (event.detail.ok) {
+          resolve(event.detail.data ?? null);
+        } else {
+          reject(new Error(event.detail.error || 'Page bridge request failed.'));
+        }
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Timed out talking to the LeetCode page editor.'));
+      }, timeoutMs);
+
+      window.addEventListener('retained:response', onResponse);
+      window.dispatchEvent(new CustomEvent('retained:request', { detail: { requestId, action, payload } }));
+    });
+  }
+
   function isLeetCodeProblemPage() {
     return PROBLEM_PATH_PATTERN.test(location.pathname);
   }
@@ -131,24 +167,8 @@
     return 'txt';
   }
 
-  function getEditorModel() {
-    const models = window.monaco?.editor?.getModels?.() || [];
-    if (!models.length) {
-      return null;
-    }
-
-    return models.find((model) => typeof model?.getValue === 'function' && model.getValue().trim().length > 0) || models[0];
-  }
-
-  function getSourceCode() {
-    const model = getEditorModel();
-    if (model) {
-      const value = model.getValue?.();
-      if (typeof value === 'string') {
-        return value;
-      }
-    }
-
+  // Best-effort fallback when the page bridge isn't available (e.g. still loading).
+  function getSourceCodeFallback() {
     const textareaCandidates = [
       'textarea[aria-label*="code" i]',
       'textarea'
@@ -165,27 +185,25 @@
     return '';
   }
 
-  // Writes code into the active Monaco model, i.e. pastes it into the LeetCode editor.
-  function setEditorCode(code) {
-    const model = getEditorModel();
-    if (!model || typeof model.setValue !== 'function') {
-      throw new Error('Could not access the LeetCode editor to paste the saved solution.');
+  // Reads {code, languageId} straight from the Monaco model via page-bridge.js,
+  // since content.js runs in an isolated JS world and cannot see window.monaco.
+  async function getBridgedEditorState() {
+    try {
+      const data = await callPageBridge('get-state', null);
+      return { code: data?.code || '', languageId: data?.languageId || '' };
+    } catch (error) {
+      console.warn('[Retained] Page bridge unavailable, falling back to DOM scraping:', error);
+      return { code: getSourceCodeFallback(), languageId: '' };
     }
-    model.setValue(code);
   }
 
-  function getLanguageInfo() {
-    const model = getEditorModel();
-    const languageId = model?.getLanguageId?.() || '';
+  // Pastes code into the LeetCode editor via page-bridge.js. Throws if the
+  // bridge can't find a Monaco model (e.g. editor not loaded yet on this page).
+  async function setEditorCode(code) {
+    await callPageBridge('set-code', { code });
+  }
 
-    if (languageId) {
-      return {
-        languageId,
-        extension: mapLanguageToExtension(languageId),
-        label: languageId
-      };
-    }
-
+  function getLanguageInfoFromDom() {
     const languageSelectors = [
       '[data-cy="lang-select"]',
       'button[aria-label*="language" i]',
@@ -213,7 +231,7 @@
 
   function buildLookupPayload() {
     const problemTitle = getProblemTitle();
-    const languageInfo = getLanguageInfo();
+    const languageInfo = getLanguageInfoFromDom();
 
     return {
       problemTitle,
@@ -230,15 +248,20 @@
 
     while (Date.now() - startedAt < timeoutMs) {
       const title = getProblemTitle();
-      const code = getSourceCode();
-      const languageInfo = getLanguageInfo();
+      const { code, languageId } = await getBridgedEditorState();
+      const domLanguageInfo = getLanguageInfoFromDom();
 
-      if (title && code.trim().length > 0 && languageInfo.extension) {
+      // Prefer the real Monaco language id (from the bridge); fall back to
+      // the language button text if the bridge couldn't reach the editor.
+      const extension = languageId ? mapLanguageToExtension(languageId) : domLanguageInfo.extension;
+      const label = languageId || domLanguageInfo.label || domLanguageInfo.languageId;
+
+      if (title && code.trim().length > 0 && extension) {
         return {
           problemTitle: title,
           problemPath: getNormalizedProblemPath(),
-          language: languageInfo.label || languageInfo.languageId,
-          extension: languageInfo.extension,
+          language: label,
+          extension,
           code
         };
       }
@@ -672,7 +695,7 @@
     }
 
     try {
-      setEditorCode(state.savedSolution.content);
+      await setEditorCode(state.savedSolution.content);
       state.status = 'pasted';
       renderUi();
       scheduleAutoClose(PASTED_TOAST_MS, goReady);
