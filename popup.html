@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Retained</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="popup">
+    <header>
+      <div class="logo">💾</div>
+      <div class="title-group">
+        <h1>Retained</h1>
+        <p>Customize the floating Save button</p>
+      </div>
+    </header>
+
+    <section class="section">
+      <div class="section-label">
+        <span>Button &amp; text size</span>
+        <span class="value-pill" id="sizeValue">100%</span>
+      </div>
+      <input type="range" id="sizeSlider" min="80" max="160" step="5" value="100" />
+
+      <div class="preview-row">
+        <button class="preview-btn" id="previewBtn" type="button">
+          <span>💾</span><span>Save Solution</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-label"><span>Color &amp; style</span></div>
+      <div class="swatch-row">
+        <button class="swatch" data-color="#3b82f6" style="background:#3b82f6" aria-label="Blue" title="Blue"></button>
+        <button class="swatch" data-color="#10b981" style="background:#10b981" aria-label="Green" title="Green"></button>
+        <button class="swatch" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Purple" title="Purple"></button>
+        <div class="swatch hex-swatch" id="hexSwatch" title="Custom hex color">
+          <span class="hash">#</span>
+          <input type="text" id="hexInput" placeholder="3b82f6" maxlength="7" spellcheck="false" />
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span id="status">Saved</span>
+    </footer>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

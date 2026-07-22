@@ -3,7 +3,7 @@
   "name": "Retained",
   "version": "1.0.0",
   "description": "Save accepted LeetCode solutions to Google Drive, and restore them on revisit — on your terms, via an explicit Save button.",
-  "permissions": ["identity", "activeTab", "clipboardWrite"],
+  "permissions": ["identity", "activeTab", "clipboardWrite", "storage"],
   "host_permissions": [
     "https://leetcode.com/*",
     "https://www.googleapis.com/*"
@@ -35,6 +35,7 @@
   },
   "action": {
     "default_title": "Retained — LeetCode to Google Drive",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

@@ -42,8 +42,48 @@
     autoSaveArmed: false,
     autoSaveArmTimer: null,
     autoSaveObserver: null,
-    lastHandledResultNode: null
+    lastHandledResultNode: null,
+    appearance: { scale: 1, color: '#3b82f6' }
   };
+
+  const APPEARANCE_STORAGE_KEY = 'retainedAppearance';
+
+  function hexToRgbTriplet(hex) {
+    const clean = hex.replace('#', '');
+    const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean;
+    const bigint = parseInt(full, 16);
+    return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255];
+  }
+
+  function getContrastTextColor(hex) {
+    const [r, g, b] = hexToRgbTriplet(hex);
+    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminance > 0.6 ? '#0b1523' : '#eff6ff';
+  }
+
+  function loadAppearance(callback) {
+    try {
+      chrome.storage.sync.get([APPEARANCE_STORAGE_KEY], (result) => {
+        const stored = result && result[APPEARANCE_STORAGE_KEY];
+        if (stored) {
+          state.appearance = Object.assign({}, state.appearance, stored);
+        }
+        callback && callback();
+      });
+    } catch (err) {
+      callback && callback();
+    }
+  }
+
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync' || !changes[APPEARANCE_STORAGE_KEY]) return;
+      state.appearance = Object.assign({}, state.appearance, changes[APPEARANCE_STORAGE_KEY].newValue);
+      renderUi();
+    });
+  } catch (err) {
+    // storage API unavailable — appearance customization simply won't live-update
+  }
 
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -380,6 +420,10 @@
     const problemTitle = escapeHtml(getProblemTitle());
     const errorMsg = escapeHtml(state.errorMessage || 'An unexpected error occurred.');
 
+    const launcherScale = state.appearance.scale || 1;
+    const launcherColor = state.appearance.color || '#3b82f6';
+    const launcherTextColor = getContrastTextColor(launcherColor);
+
     const css = `
       :host { all: initial; }
 
@@ -504,26 +548,28 @@
       }
       @keyframes spin { to { transform: rotate(360deg); } }
 
-      /* Persistent floating Save pill (the 'ready' state) */
+      /* Persistent floating Save pill (the 'ready' state) — size and color
+         are user-configurable via the toolbar popup, stored in
+         chrome.storage.sync and read into state.appearance. */
       .launcher {
         appearance: none;
-        border: 1px solid rgba(99, 148, 210, 0.3);
-        background: linear-gradient(135deg, rgba(15, 27, 46, 0.97), rgba(26, 42, 66, 0.97));
-        color: #eff6ff;
+        border: 1px solid ${launcherColor}80;
+        background: ${launcherColor};
+        color: ${launcherTextColor};
         box-shadow: 0 12px 40px rgba(4, 12, 24, 0.5);
         border-radius: 999px;
-        padding: 11px 16px;
+        padding: ${(11 * launcherScale).toFixed(1)}px ${(16 * launcherScale).toFixed(1)}px;
         cursor: pointer;
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        font-size: 13px;
+        font-size: ${(13 * launcherScale).toFixed(1)}px;
         font-weight: 600;
         font-family: inherit;
         pointer-events: auto;
-        transition: transform 0.12s, border-color 0.12s;
+        transition: transform 0.12s, filter 0.12s;
       }
-      .launcher:hover { transform: translateY(-1px); border-color: rgba(139, 191, 255, 0.5); }
+      .launcher:hover { transform: translateY(-1px); filter: brightness(1.1); }
     `;
 
     let inner = '';
@@ -951,9 +997,13 @@
     runLookup();
   }
 
+  function boot() {
+    loadAppearance(initializeContentScript);
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializeContentScript, { once: true });
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {
-    initializeContentScript();
+    boot();
   }
 })();
